@@ -1,71 +1,196 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   ScrollView,
   StyleSheet,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
-import Colors from '../../constants/colors';
+import { Colors } from '../../constants/colors';
+import { supabase } from '../../lib/supabase';
+import { getLiveQueue, callNextToken, subscribeToQueue, getCurrentToken } from '../../lib/api/queue';
+import type { QueueToken, Doctor } from '../../types';
 
-const UPCOMING_TOKENS = [
-  { token: 16, name: 'Sunita Devi', reason: 'Cough', time: '10:45' },
-  { token: 17, name: 'Ramesh Kumar', reason: 'Checkup', time: '11:00' },
-  { token: 18, name: 'Meera Patel', reason: 'Follow-up', time: '11:15' },
-  { token: 19, name: 'Arjun Singh', reason: 'Back pain', time: '11:30' },
-  { token: 20, name: 'Pooja Sharma', reason: 'Headache', time: '11:45' },
-];
+const REC_DARK = '#003380';
+const REC_BLUE = '#0052CC';
 
 export default function QueueScreen() {
-  const router = useRouter();
-  const [counter, setCounter] = useState(15);
+  const todayISO = new Date().toISOString().split('T')[0];
+
+  const [loading, setLoading] = useState(true);
+  const [callingNext, setCallingNext] = useState(false);
+  const [doctor, setDoctor] = useState<Doctor | null>(null);
+  const [currentToken, setCurrentToken] = useState<QueueToken | null>(null);
+  const [upcomingTokens, setUpcomingTokens] = useState<QueueToken[]>([]);
+  // Appointment data keyed by appointment_id for showing patient name/reason
+  const [apptMap, setApptMap] = useState<Record<string, { patient_name: string; reason: string; start_time: string }>>({});
+
+  const fetchApptDetails = useCallback(async (tokens: QueueToken[]) => {
+    const ids = tokens.map((t) => t.appointment_id).filter(Boolean);
+    if (ids.length === 0) return;
+    const { data } = await supabase
+      .from('appointments')
+      .select('id, patient_name, reason, start_time')
+      .in('id', ids);
+    if (data) {
+      const map: Record<string, { patient_name: string; reason: string; start_time: string }> = {};
+      data.forEach((a: any) => { map[a.id] = a; });
+      setApptMap(map);
+    }
+  }, []);
+
+  const fetchQueue = useCallback(async (doc: Doctor) => {
+    const [current, queue] = await Promise.all([
+      getCurrentToken(doc.id, todayISO),
+      getLiveQueue(doc.id, todayISO),
+    ]);
+    setCurrentToken(current);
+    const waiting = queue.filter((t) => t.status === 'waiting');
+    setUpcomingTokens(waiting);
+    await fetchApptDetails([...(current ? [current] : []), ...waiting]);
+  }, [todayISO, fetchApptDetails]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+        const { data: recProfile } = await supabase
+          .from('profiles')
+          .select('hospital_id')
+          .eq('id', session.user.id)
+          .maybeSingle();
+        if (!recProfile?.hospital_id) return;
+        const { data: doc } = await supabase
+          .from('doctors')
+          .select('*')
+          .eq('hospital_id', recProfile.hospital_id)
+          .eq('is_available', true)
+          .limit(1)
+          .single();
+        if (doc) {
+          setDoctor(doc as Doctor);
+          await fetchQueue(doc as Doctor);
+        }
+      } catch (e) {
+        // non-fatal
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [fetchQueue]);
+
+  useEffect(() => {
+    if (!doctor) return;
+    const unsub = subscribeToQueue(doctor.id, todayISO, async (tokens) => {
+      const current = tokens.find((t) => t.status === 'in_room') ?? null;
+      const waiting = tokens.filter((t) => t.status === 'waiting');
+      setCurrentToken(current);
+      setUpcomingTokens(waiting);
+      await fetchApptDetails([...(current ? [current] : []), ...waiting]);
+    });
+    return () => { unsub(); };
+  }, [doctor, todayISO, fetchApptDetails]);
+
+  const handleCallNext = async () => {
+    if (!doctor) return;
+    setCallingNext(true);
+    try {
+      await callNextToken(doctor.id, todayISO);
+      await fetchQueue(doctor);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Could not call next token');
+    } finally {
+      setCallingNext(false);
+    }
+  };
+
+  const nextToken = upcomingTokens[0];
+  const currentAppt = currentToken ? apptMap[currentToken.appointment_id] : null;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backText}>{'← Back'}</Text>
-        </TouchableOpacity>
         <Text style={styles.headerTitle}>Queue Manager</Text>
-        <Text style={styles.headerSubtitle}>Dr. Priya Sharma</Text>
+        {doctor && (
+          <Text style={styles.headerSubtitle}>
+            {doctor.full_name} · Room {doctor.room_number ?? '—'}
+          </Text>
+        )}
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.nowServingCard}>
-          <Text style={styles.nowServingLabel}>Now Serving</Text>
-          <Text style={styles.tokenNumber}>Token #{counter}</Text>
-          <Text style={styles.patientName}>Raman Verma · Fever</Text>
-          <TouchableOpacity
-            style={styles.callButton}
-            onPress={() => setCounter((prev) => prev + 1)}
-          >
-            <Text style={styles.callButtonText}>📢 Call Token #{counter + 1}</Text>
-          </TouchableOpacity>
-        </View>
-
-        <Text style={styles.sectionTitle}>Upcoming Tokens</Text>
-
-        {UPCOMING_TOKENS.map((item) => (
-          <View key={item.token} style={styles.tokenCard}>
-            <View style={styles.tokenCardLeft}>
-              <View style={styles.tokenBadge}>
-                <Text style={styles.tokenBadgeText}>#{item.token}</Text>
-              </View>
-              <View style={styles.tokenInfo}>
-                <Text style={styles.tokenPatientName}>{item.name}</Text>
-                <Text style={styles.tokenMeta}>
-                  {item.reason} · {item.time}
+      {loading ? (
+        <ActivityIndicator color={REC_BLUE} style={styles.loader} />
+      ) : (
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Now Serving */}
+          <View style={styles.nowServingCard}>
+            <Text style={styles.nowServingEyebrow}>NOW SERVING</Text>
+            <Text style={styles.tokenNumber}>
+              Token #{currentToken?.token_number ?? '—'}
+            </Text>
+            <Text style={styles.patientInfo}>
+              {currentAppt
+                ? `${currentAppt.patient_name} · ${currentAppt.reason}`
+                : 'No patient in room'}
+            </Text>
+            <TouchableOpacity
+              style={[styles.callBtn, callingNext && styles.callBtnDisabled]}
+              onPress={handleCallNext}
+              disabled={callingNext || !nextToken}
+              activeOpacity={0.85}
+            >
+              {callingNext ? (
+                <ActivityIndicator color={REC_DARK} size="small" />
+              ) : (
+                <Text style={styles.callBtnText}>
+                  📢 Call Token #{nextToken?.token_number ?? '—'}
                 </Text>
-              </View>
-            </View>
-            <View style={styles.waitingPill}>
-              <Text style={styles.waitingPillText}>Waiting</Text>
-            </View>
+              )}
+            </TouchableOpacity>
           </View>
-        ))}
-      </ScrollView>
+
+          <Text style={styles.sectionTitle}>UPCOMING TOKENS</Text>
+
+          {upcomingTokens.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyEmoji}>🎉</Text>
+              <Text style={styles.emptyText}>Queue is empty</Text>
+              <Text style={styles.emptySubtext}>No patients waiting right now</Text>
+            </View>
+          ) : (
+            upcomingTokens.map((item) => {
+              const appt = apptMap[item.appointment_id];
+              return (
+                <View key={item.id} style={styles.tokenCard}>
+                  <View style={styles.tokenLeft}>
+                    <View style={styles.tokenBadge}>
+                      <Text style={styles.tokenBadgeText}>#{item.token_number}</Text>
+                    </View>
+                    <View style={styles.tokenInfo}>
+                      <Text style={styles.tokenPatientName}>
+                        {appt?.patient_name ?? 'Patient'}
+                      </Text>
+                      <Text style={styles.tokenMeta}>
+                        {appt?.reason ?? '—'}{appt?.start_time ? ` · ${appt.start_time}` : ''}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.waitingPill}>
+                    <Text style={styles.waitingPillText}>Waiting</Text>
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
@@ -76,18 +201,10 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
   },
   header: {
-    backgroundColor: '#003380',
+    backgroundColor: REC_DARK,
     paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 20,
-  },
-  backButton: {
-    marginBottom: 8,
-  },
-  backText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    opacity: 0.85,
+    paddingTop: 16,
+    paddingBottom: 22,
   },
   headerTitle: {
     color: '#FFFFFF',
@@ -95,98 +212,115 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   headerSubtitle: {
-    color: '#FFFFFF',
+    color: '#A8C4FF',
     fontSize: 14,
-    opacity: 0.8,
-    marginTop: 2,
+    marginTop: 3,
+  },
+  loader: {
+    marginTop: 48,
   },
   scrollContent: {
     padding: 16,
     paddingBottom: 32,
   },
   nowServingCard: {
-    backgroundColor: '#003380',
+    backgroundColor: REC_DARK,
     borderRadius: 16,
     padding: 24,
     marginBottom: 24,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowColor: REC_DARK,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    elevation: 8,
   },
-  nowServingLabel: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    opacity: 0.75,
-    marginBottom: 8,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
+  nowServingEyebrow: {
+    color: '#7EB3FF',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+    marginBottom: 10,
   },
   tokenNumber: {
     color: '#FFFFFF',
-    fontSize: 40,
-    fontWeight: '800',
-    marginBottom: 4,
+    fontSize: 44,
+    fontWeight: '900',
+    marginBottom: 6,
+    fontVariant: ['tabular-nums'],
   },
-  patientName: {
-    color: '#FFFFFF',
+  patientInfo: {
+    color: '#B8D0FF',
     fontSize: 15,
-    opacity: 0.85,
-    marginBottom: 20,
+    marginBottom: 22,
+    textAlign: 'center',
   },
-  callButton: {
+  callBtn: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 28,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    minWidth: 200,
+    alignItems: 'center',
   },
-  callButtonText: {
-    color: '#003380',
+  callBtnDisabled: {
+    opacity: 0.5,
+  },
+  callBtnText: {
+    color: REC_DARK,
     fontSize: 15,
     fontWeight: '700',
   },
   sectionTitle: {
-    fontSize: 17,
+    fontSize: 11,
     fontWeight: '700',
-    color: Colors.text,
+    color: Colors.sub,
+    letterSpacing: 0.8,
     marginBottom: 12,
   },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    backgroundColor: Colors.card,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: Colors.border,
+  },
+  emptyEmoji: { fontSize: 36, marginBottom: 10 },
+  emptyText: { fontSize: 16, fontWeight: '700', color: Colors.text },
+  emptySubtext: { fontSize: 13, color: Colors.sub, marginTop: 4 },
   tokenCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    backgroundColor: Colors.card,
+    borderRadius: 14,
     padding: 14,
     marginBottom: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.07,
-    shadowRadius: 4,
-    elevation: 3,
+    borderWidth: 1.5,
+    borderColor: Colors.border,
   },
-  tokenCardLeft: {
+  tokenLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
   },
   tokenBadge: {
-    backgroundColor: '#fef9c3',
+    backgroundColor: '#FEF9C3',
     borderRadius: 8,
     paddingVertical: 6,
     paddingHorizontal: 10,
     marginRight: 12,
+    minWidth: 46,
+    alignItems: 'center',
   },
   tokenBadgeText: {
     color: '#856404',
     fontSize: 13,
     fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
-  tokenInfo: {
-    flex: 1,
-  },
+  tokenInfo: { flex: 1 },
   tokenPatientName: {
     fontSize: 15,
     fontWeight: '700',
@@ -198,14 +332,14 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   waitingPill: {
-    backgroundColor: '#f1f5f9',
+    backgroundColor: '#FEF9C3',
     borderRadius: 20,
     paddingVertical: 4,
     paddingHorizontal: 12,
   },
   waitingPillText: {
-    color: Colors.sub,
+    color: '#856404',
     fontSize: 12,
-    fontWeight: '500',
+    fontWeight: '600',
   },
 });
