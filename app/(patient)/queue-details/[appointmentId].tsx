@@ -8,7 +8,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import Colors from '../../../constants/colors';
+import { Colors } from '../../../constants/colors';
 import { supabase } from '../../../lib/supabase';
 import { useAuth } from '../../../lib/context/AuthContext';
 
