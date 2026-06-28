@@ -1,20 +1,34 @@
+// Matches prototype design exactly
 export const Colors = {
-  primary: '#0066FF',
-  primaryDark: '#0052CC',
-  primaryLight: '#E8F0FE',
-  secondary: '#00B8A9',
-  success: '#00875A',
-  warning: '#FF8B00',
-  error: '#DE350B',
-  white: '#FFFFFF',
-  black: '#172B4D',
-  textPrimary: '#172B4D',
-  textSecondary: '#42526E',
-  textMuted: '#97A0AF',
-  border: '#DFE1E6',
+  // Brand blue (prototype calls this "green" but it's #1A35FF)
+  primary: '#1A35FF',
+  primaryDark: '#1228CC',
+  primaryLight: '#EEF0FF',
+
+  // Text
+  text: '#0A1929',
+  sub: '#4A5080',
+  muted: '#97A0AF',
+
+  // UI
+  border: '#C5CAFF',
   background: '#F4F5F7',
-  cardBackground: '#FFFFFF',
-  patientAccent: '#0066FF',
+  card: '#FFFFFF',
+  white: '#FFFFFF',
+  black: '#0A1929',
+
+  // Status colors
+  orange: '#FF8B00',
+  red: '#DE350B',
+  yellow: '#F59E0B',
+  green: '#16a34a',
+  teal: '#00B8A9',
+  purple: '#6554C0',
+
+  // Role accents
+  patientAccent: '#1A35FF',
   doctorAccent: '#00B8A9',
   labAccent: '#6554C0',
+  receptionAccent: '#0052CC',
+  adminAccent: '#1e1b4b',
 }
