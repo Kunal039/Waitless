@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -7,21 +7,80 @@ import {
   ScrollView,
   Alert,
   StyleSheet,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import Colors from '../../constants/colors';
+import { Colors } from '../../constants/colors';
+import { supabase } from '../../lib/supabase';
+import { createAppointment, createQueueToken } from '../../lib/api/appointments';
+import type { Doctor } from '../../types';
 
-const DOCTORS = [
-  { label: 'Dr. Priya Sharma', sub: 'General' },
-  { label: 'Dr. Amit Patel', sub: 'Cardiology' },
-  { label: 'Dr. Sunita Roy', sub: 'Dermatology' },
+const REC_DARK = '#003380';
+const REC_BLUE = '#0052CC';
+
+const REASONS = [
+  'Fever',
+  'Cough & Cold',
+  'Headache',
+  'Back Pain',
+  'Checkup',
+  'Follow-up',
+  'Emergency',
+  'Other',
 ];
-
-const REASONS = ['Fever', 'Checkup', 'Follow-up', 'Emergency'];
-const PAYMENTS = ['Cash', 'UPI', 'Card'];
-
+const PAYMENTS: string[] = ['Cash', 'UPI', 'Card'];
 type Gender = 'Male' | 'Female' | 'Other' | '';
+
+interface PickerFieldProps {
+  label: string;
+  value: string;
+  placeholder: string;
+  open: boolean;
+  onToggle: () => void;
+  options: { label: string; sub?: string; value: string }[];
+  onSelect: (val: string) => void;
+}
+
+function PickerField({ label, value, placeholder, open, onToggle, options, onSelect }: PickerFieldProps) {
+  return (
+    <View>
+      <Text style={fieldStyles.label}>{label}</Text>
+      <TouchableOpacity style={fieldStyles.toggle} onPress={onToggle} activeOpacity={0.8}>
+        <Text style={value ? fieldStyles.value : fieldStyles.placeholder}>
+          {value || placeholder}
+        </Text>
+        <Text style={fieldStyles.arrow}>{open ? '▲' : '▼'}</Text>
+      </TouchableOpacity>
+      {open && (
+        <View style={fieldStyles.list}>
+          {options.map((opt) => (
+            <TouchableOpacity
+              key={opt.value}
+              style={fieldStyles.listItem}
+              onPress={() => onSelect(opt.value)}
+            >
+              <Text style={fieldStyles.listItemText}>{opt.label}</Text>
+              {opt.sub ? <Text style={fieldStyles.listItemSub}>{opt.sub}</Text> : null}
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+const fieldStyles = StyleSheet.create({
+  label: { fontSize: 12, fontWeight: '700', color: Colors.sub, marginBottom: 6, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.4 },
+  toggle: { backgroundColor: '#F4F5F7', borderWidth: 1.5, borderColor: Colors.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 13, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  value: { fontSize: 15, color: Colors.text },
+  placeholder: { fontSize: 15, color: Colors.muted },
+  arrow: { fontSize: 11, color: Colors.sub },
+  list: { borderWidth: 1.5, borderColor: Colors.border, borderRadius: 10, backgroundColor: Colors.card, marginTop: 4, overflow: 'hidden' },
+  listItem: { paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: '#F0F2F8' },
+  listItemText: { fontSize: 15, color: Colors.text, fontWeight: '500' },
+  listItemSub: { fontSize: 12, color: Colors.sub, marginTop: 2 },
+});
 
 export default function RegisterPatientScreen() {
   const router = useRouter();
@@ -30,77 +89,216 @@ export default function RegisterPatientScreen() {
   const [age, setAge] = useState('');
   const [gender, setGender] = useState<Gender>('');
   const [mobile, setMobile] = useState('');
-  const [selectedDoctor, setSelectedDoctor] = useState('');
+  const [selectedDoctorId, setSelectedDoctorId] = useState('');
+  const [selectedDoctorLabel, setSelectedDoctorLabel] = useState('');
   const [selectedReason, setSelectedReason] = useState('');
   const [selectedPayment, setSelectedPayment] = useState('');
-  const [showDoctorPicker, setShowDoctorPicker] = useState(false);
-  const [showReasonPicker, setShowReasonPicker] = useState(false);
-  const [showPaymentPicker, setShowPaymentPicker] = useState(false);
+  const [openPicker, setOpenPicker] = useState<'doctor' | 'reason' | 'payment' | null>(null);
+  const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [hospitalId, setHospitalId] = useState<string | null>(null);
+  const [loadingDoctors, setLoadingDoctors] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [successToken, setSuccessToken] = useState<number | null>(null);
 
-  const handleSubmit = () => {
-    if (!name.trim()) {
-      Alert.alert('Validation Error', 'Please enter patient name.');
-      return;
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+        const { data: recProfile } = await supabase
+          .from('profiles')
+          .select('hospital_id')
+          .eq('id', session.user.id)
+          .maybeSingle();
+        const hid: string | null = recProfile?.hospital_id ?? null;
+        setHospitalId(hid);
+        if (hid) {
+          const { data: docs } = await supabase
+            .from('doctors')
+            .select('*')
+            .eq('hospital_id', hid)
+            .eq('is_available', true)
+            .order('full_name');
+          setDoctors((docs ?? []) as Doctor[]);
+        }
+      } catch (e) {
+        // non-fatal
+      } finally {
+        setLoadingDoctors(false);
+      }
+    })();
+  }, []);
+
+  const selectedDoctorObj = doctors.find((d) => d.id === selectedDoctorId);
+  const consultationFee = selectedDoctorObj?.consultation_fee ?? null;
+  const todayISO = new Date().toISOString().split('T')[0];
+
+  const handleSubmit = async () => {
+    if (!name.trim()) { Alert.alert('Missing', 'Please enter patient name.'); return; }
+    if (!age.trim() || isNaN(Number(age))) { Alert.alert('Missing', 'Please enter a valid age.'); return; }
+    if (!gender) { Alert.alert('Missing', 'Please select gender.'); return; }
+    if (!mobile.trim() || mobile.trim().length < 10) { Alert.alert('Missing', 'Please enter a valid 10-digit mobile number.'); return; }
+    if (!selectedDoctorId) { Alert.alert('Missing', 'Please select a doctor.'); return; }
+    if (!selectedReason) { Alert.alert('Missing', 'Please select a reason for visit.'); return; }
+    if (!selectedPayment) { Alert.alert('Missing', 'Please select payment mode.'); return; }
+
+    setSubmitting(true);
+    try {
+      // Upsert patient profile
+      const { data: existingProfile } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('phone', mobile.trim())
+        .eq('role', 'patient')
+        .maybeSingle();
+
+      let patientId: string;
+      if (existingProfile) {
+        patientId = existingProfile.id;
+      } else {
+        const { data: newUser, error: signUpErr } = await supabase.auth.admin
+          ? // Admin not available on client; create anonymous patient profile instead
+          { data: null, error: new Error('use_insert') }
+          : { data: null, error: new Error('use_insert') };
+
+        // Insert into profiles directly (walk-in patient without auth)
+        const { data: inserted, error: insertErr } = await supabase
+          .from('profiles')
+          .insert({
+            full_name: name.trim(),
+            phone: mobile.trim(),
+            age: Number(age),
+            gender,
+            role: 'patient',
+            email: null,
+          })
+          .select('id')
+          .single();
+        if (insertErr) throw insertErr;
+        patientId = inserted.id;
+      }
+
+      // Create appointment
+      const doc = selectedDoctorObj!;
+      const appointment = await createAppointment({
+        patient_id: patientId,
+        hospital_id: hospitalId!,
+        doctor_id: selectedDoctorId,
+        doctor_slot_id: '', // walk-in: no slot
+        date: todayISO,
+        start_time: new Date().toTimeString().slice(0, 5),
+        end_time: new Date(Date.now() + 20 * 60000).toTimeString().slice(0, 5),
+        patient_name: name.trim(),
+        patient_age: Number(age),
+        patient_gender: gender,
+        patient_phone: mobile.trim(),
+        reason: selectedReason,
+      });
+
+      // Create queue token
+      const tokenNum = await createQueueToken({
+        appointment_id: appointment.id,
+        hospital_id: hospitalId!,
+        doctor_id: selectedDoctorId,
+        date: todayISO,
+      });
+
+      setSuccessToken(tokenNum);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Registration failed. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
-    if (!mobile.trim()) {
-      Alert.alert('Validation Error', 'Please enter mobile number.');
-      return;
-    }
-    const token = Math.floor(Math.random() * (25 - 16 + 1)) + 16;
-    Alert.alert('Patient Registered!', `Token #${token} issued for ${name}`);
   };
+
+  if (successToken !== null) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <View style={styles.successScreen}>
+          <View style={styles.successIconWrap}>
+            <Text style={styles.successIcon}>✅</Text>
+          </View>
+          <Text style={styles.successTitle}>Patient Registered!</Text>
+          <Text style={styles.successName}>{name}</Text>
+          <View style={styles.successTokenCard}>
+            <Text style={styles.successTokenLabel}>TOKEN NUMBER</Text>
+            <Text style={styles.successTokenNum}>#{successToken}</Text>
+            <Text style={styles.successTokenSub}>
+              {selectedDoctorLabel}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.goToQueueBtn}
+            onPress={() => router.replace('/(reception)/queue')}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.goToQueueBtnText}>Go to Queue Manager →</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.registerAnotherBtn}
+            onPress={() => {
+              setSuccessToken(null);
+              setName(''); setAge(''); setGender(''); setMobile('');
+              setSelectedDoctorId(''); setSelectedDoctorLabel('');
+              setSelectedReason(''); setSelectedPayment('');
+            }}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.registerAnotherBtnText}>Register Another Patient</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backText}>{'← Back'}</Text>
-        </TouchableOpacity>
         <Text style={styles.headerTitle}>Register New Patient</Text>
         <Text style={styles.headerSubtitle}>Walk-in Registration</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
         <View style={styles.formCard}>
-          <Text style={styles.fieldLabel}>Full Name</Text>
+          {/* Full Name */}
+          <Text style={fieldStyles.label}>Full Name</Text>
           <TextInput
             style={styles.textInput}
             placeholder="Enter full name"
-            placeholderTextColor={Colors.sub}
+            placeholderTextColor={Colors.muted}
             value={name}
             onChangeText={setName}
           />
 
-          <View style={styles.rowContainer}>
-            <View style={styles.ageContainer}>
-              <Text style={styles.fieldLabel}>Age</Text>
+          {/* Age + Gender */}
+          <View style={styles.row}>
+            <View style={styles.ageWrap}>
+              <Text style={fieldStyles.label}>Age</Text>
               <TextInput
                 style={styles.textInput}
-                placeholder="Age"
-                placeholderTextColor={Colors.sub}
+                placeholder="e.g. 35"
+                placeholderTextColor={Colors.muted}
                 keyboardType="numeric"
                 value={age}
                 onChangeText={setAge}
+                maxLength={3}
               />
             </View>
-            <View style={styles.genderContainer}>
-              <Text style={styles.fieldLabel}>Gender</Text>
+            <View style={styles.genderWrap}>
+              <Text style={fieldStyles.label}>Gender</Text>
               <View style={styles.genderRow}>
                 {(['Male', 'Female', 'Other'] as Gender[]).map((g) => (
                   <TouchableOpacity
                     key={g}
-                    style={[
-                      styles.genderButton,
-                      gender === g && styles.genderButtonSelected,
-                    ]}
+                    style={[styles.genderBtn, gender === g && styles.genderBtnActive]}
                     onPress={() => setGender(g)}
+                    activeOpacity={0.8}
                   >
-                    <Text
-                      style={[
-                        styles.genderButtonText,
-                        gender === g && styles.genderButtonTextSelected,
-                      ]}
-                    >
+                    <Text style={[styles.genderBtnText, gender === g && styles.genderBtnTextActive]}>
                       {g}
                     </Text>
                   </TouchableOpacity>
@@ -109,116 +307,84 @@ export default function RegisterPatientScreen() {
             </View>
           </View>
 
-          <Text style={styles.fieldLabel}>Mobile Number</Text>
+          {/* Mobile */}
+          <Text style={fieldStyles.label}>Mobile Number</Text>
           <TextInput
             style={styles.textInput}
-            placeholder="Enter mobile number"
-            placeholderTextColor={Colors.sub}
+            placeholder="10-digit mobile number"
+            placeholderTextColor={Colors.muted}
             keyboardType="phone-pad"
             value={mobile}
             onChangeText={setMobile}
+            maxLength={10}
           />
 
-          <Text style={styles.fieldLabel}>Select Doctor</Text>
-          <TouchableOpacity
-            style={styles.pickerToggle}
-            onPress={() => {
-              setShowDoctorPicker((prev) => !prev);
-              setShowReasonPicker(false);
-              setShowPaymentPicker(false);
-            }}
-          >
-            <Text style={selectedDoctor ? styles.pickerValue : styles.pickerPlaceholder}>
-              {selectedDoctor || 'Tap to select doctor'}
-            </Text>
-            <Text style={styles.pickerArrow}>{showDoctorPicker ? '▲' : '▼'}</Text>
-          </TouchableOpacity>
-          {showDoctorPicker && (
-            <View style={styles.pickerList}>
-              {DOCTORS.map((doc) => (
-                <TouchableOpacity
-                  key={doc.label}
-                  style={styles.pickerItem}
-                  onPress={() => {
-                    setSelectedDoctor(`${doc.label} · ${doc.sub}`);
-                    setShowDoctorPicker(false);
-                  }}
-                >
-                  <Text style={styles.pickerItemText}>{doc.label}</Text>
-                  <Text style={styles.pickerItemSub}>{doc.sub}</Text>
-                </TouchableOpacity>
-              ))}
+          {/* Doctor */}
+          {loadingDoctors ? (
+            <ActivityIndicator color={REC_BLUE} style={{ marginTop: 16 }} />
+          ) : (
+            <PickerField
+              label="Select Doctor"
+              value={selectedDoctorLabel}
+              placeholder="Tap to select doctor"
+              open={openPicker === 'doctor'}
+              onToggle={() => setOpenPicker(openPicker === 'doctor' ? null : 'doctor')}
+              options={doctors.map((d) => ({
+                value: d.id,
+                label: d.full_name,
+                sub: `${d.specialization} · ₹${d.consultation_fee}`,
+              }))}
+              onSelect={(val) => {
+                const doc = doctors.find((d) => d.id === val);
+                setSelectedDoctorId(val);
+                setSelectedDoctorLabel(doc ? `${doc.full_name} · ${doc.specialization}` : '');
+                setOpenPicker(null);
+              }}
+            />
+          )}
+
+          {/* Reason */}
+          <PickerField
+            label="Reason for Visit"
+            value={selectedReason}
+            placeholder="Tap to select reason"
+            open={openPicker === 'reason'}
+            onToggle={() => setOpenPicker(openPicker === 'reason' ? null : 'reason')}
+            options={REASONS.map((r) => ({ value: r, label: r }))}
+            onSelect={(val) => { setSelectedReason(val); setOpenPicker(null); }}
+          />
+
+          {/* Payment */}
+          <PickerField
+            label="Payment Mode"
+            value={selectedPayment}
+            placeholder="Tap to select payment mode"
+            open={openPicker === 'payment'}
+            onToggle={() => setOpenPicker(openPicker === 'payment' ? null : 'payment')}
+            options={PAYMENTS.map((p) => ({ value: p, label: p }))}
+            onSelect={(val) => { setSelectedPayment(val); setOpenPicker(null); }}
+          />
+
+          {/* Fee display */}
+          {consultationFee !== null && (
+            <View style={styles.feeCard}>
+              <Text style={styles.feeLabel}>Consultation Fee</Text>
+              <Text style={styles.feeAmount}>₹{consultationFee}</Text>
             </View>
           )}
 
-          <Text style={styles.fieldLabel}>Reason for Visit</Text>
+          {/* Submit */}
           <TouchableOpacity
-            style={styles.pickerToggle}
-            onPress={() => {
-              setShowReasonPicker((prev) => !prev);
-              setShowDoctorPicker(false);
-              setShowPaymentPicker(false);
-            }}
+            style={[styles.submitBtn, submitting && styles.submitBtnDisabled]}
+            onPress={handleSubmit}
+            disabled={submitting}
+            activeOpacity={0.85}
           >
-            <Text style={selectedReason ? styles.pickerValue : styles.pickerPlaceholder}>
-              {selectedReason || 'Tap to select reason'}
-            </Text>
-            <Text style={styles.pickerArrow}>{showReasonPicker ? '▲' : '▼'}</Text>
-          </TouchableOpacity>
-          {showReasonPicker && (
-            <View style={styles.pickerList}>
-              {REASONS.map((reason) => (
-                <TouchableOpacity
-                  key={reason}
-                  style={styles.pickerItem}
-                  onPress={() => {
-                    setSelectedReason(reason);
-                    setShowReasonPicker(false);
-                  }}
-                >
-                  <Text style={styles.pickerItemText}>{reason}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-
-          <Text style={styles.fieldLabel}>Payment Mode</Text>
-          <TouchableOpacity
-            style={styles.pickerToggle}
-            onPress={() => {
-              setShowPaymentPicker((prev) => !prev);
-              setShowDoctorPicker(false);
-              setShowReasonPicker(false);
-            }}
-          >
-            <Text style={selectedPayment ? styles.pickerValue : styles.pickerPlaceholder}>
-              {selectedPayment || 'Tap to select payment mode'}
-            </Text>
-            <Text style={styles.pickerArrow}>{showPaymentPicker ? '▲' : '▼'}</Text>
-          </TouchableOpacity>
-          {showPaymentPicker && (
-            <View style={styles.pickerList}>
-              {PAYMENTS.map((payment) => (
-                <TouchableOpacity
-                  key={payment}
-                  style={styles.pickerItem}
-                  onPress={() => {
-                    setSelectedPayment(payment);
-                    setShowPaymentPicker(false);
-                  }}
-                >
-                  <Text style={styles.pickerItemText}>{payment}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-
-          <View style={styles.feeCard}>
-            <Text style={styles.feeText}>Consultation Fee ₹500</Text>
-          </View>
-
-          <TouchableOpacity style={styles.submitButton} onPress={handleSubmit}>
-            <Text style={styles.submitButtonText}>✅ Register & Issue Token</Text>
+            {submitting ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={styles.submitBtnText}>Register & Issue Token</Text>
+            )}
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -232,18 +398,10 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
   },
   header: {
-    backgroundColor: '#003380',
+    backgroundColor: REC_DARK,
     paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 20,
-  },
-  backButton: {
-    marginBottom: 8,
-  },
-  backText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    opacity: 0.85,
+    paddingTop: 16,
+    paddingBottom: 22,
   },
   headerTitle: {
     color: '#FFFFFF',
@@ -251,150 +409,183 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   headerSubtitle: {
-    color: '#FFFFFF',
+    color: '#A8C4FF',
     fontSize: 14,
-    opacity: 0.8,
-    marginTop: 2,
+    marginTop: 3,
   },
   scrollContent: {
     padding: 16,
-    paddingBottom: 40,
+    paddingBottom: 48,
   },
   formCard: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: Colors.card,
     borderRadius: 16,
     padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.07,
-    shadowRadius: 6,
-    elevation: 3,
-  },
-  fieldLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: Colors.text,
-    marginBottom: 6,
-    marginTop: 14,
+    borderWidth: 1.5,
+    borderColor: Colors.border,
   },
   textInput: {
-    backgroundColor: '#f8fafc',
-    borderWidth: 1,
+    backgroundColor: '#F4F5F7',
+    borderWidth: 1.5,
     borderColor: Colors.border,
     borderRadius: 10,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 13,
     fontSize: 15,
     color: Colors.text,
   },
-  rowContainer: {
+  row: {
     flexDirection: 'row',
     gap: 12,
   },
-  ageContainer: {
+  ageWrap: {
     flex: 1,
   },
-  genderContainer: {
+  genderWrap: {
     flex: 2,
   },
   genderRow: {
     flexDirection: 'row',
     gap: 6,
   },
-  genderButton: {
+  genderBtn: {
     flex: 1,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: Colors.border,
     borderRadius: 8,
-    paddingVertical: 11,
+    paddingVertical: 12,
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: Colors.card,
   },
-  genderButtonSelected: {
-    backgroundColor: Colors.primary,
-    borderColor: Colors.primary,
+  genderBtnActive: {
+    backgroundColor: REC_BLUE,
+    borderColor: REC_BLUE,
   },
-  genderButtonText: {
-    fontSize: 13,
+  genderBtnText: {
+    fontSize: 12,
     color: Colors.sub,
-    fontWeight: '500',
+    fontWeight: '600',
   },
-  genderButtonTextSelected: {
+  genderBtnTextActive: {
     color: '#FFFFFF',
     fontWeight: '700',
   },
-  pickerToggle: {
-    backgroundColor: '#f8fafc',
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+  feeCard: {
+    backgroundColor: '#DCFCE7',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-  },
-  pickerValue: {
-    fontSize: 15,
-    color: Colors.text,
-  },
-  pickerPlaceholder: {
-    fontSize: 15,
-    color: Colors.sub,
-  },
-  pickerArrow: {
-    fontSize: 12,
-    color: Colors.sub,
-  },
-  pickerList: {
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: 10,
-    backgroundColor: '#FFFFFF',
-    marginTop: 4,
-    overflow: 'hidden',
-  },
-  pickerItem: {
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
-  },
-  pickerItemText: {
-    fontSize: 15,
-    color: Colors.text,
-    fontWeight: '500',
-  },
-  pickerItemSub: {
-    fontSize: 12,
-    color: Colors.sub,
-    marginTop: 2,
-  },
-  feeCard: {
-    backgroundColor: '#dcfce7',
-    borderWidth: 1,
-    borderColor: '#16a34a',
-    borderRadius: 10,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    alignItems: 'center',
     marginTop: 20,
+    borderWidth: 1,
+    borderColor: '#86EFAC',
   },
-  feeText: {
-    color: '#16a34a',
-    fontSize: 16,
-    fontWeight: '700',
+  feeLabel: {
+    color: Colors.green,
+    fontSize: 14,
+    fontWeight: '600',
   },
-  submitButton: {
-    backgroundColor: Colors.primary,
-    borderRadius: 12,
+  feeAmount: {
+    color: Colors.green,
+    fontSize: 20,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  submitBtn: {
+    backgroundColor: REC_BLUE,
+    borderRadius: 14,
     paddingVertical: 16,
     alignItems: 'center',
-    marginTop: 20,
+    marginTop: 24,
   },
-  submitButtonText: {
+  submitBtnDisabled: {
+    opacity: 0.6,
+  },
+  submitBtnText: {
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
+  },
+  // Success screen
+  successScreen: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+    backgroundColor: Colors.background,
+  },
+  successIconWrap: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#DCFCE7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 18,
+  },
+  successIcon: { fontSize: 36 },
+  successTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: Colors.text,
+    marginBottom: 6,
+  },
+  successName: {
+    fontSize: 17,
+    color: Colors.sub,
+    marginBottom: 32,
+  },
+  successTokenCard: {
+    backgroundColor: REC_DARK,
+    borderRadius: 20,
+    paddingVertical: 28,
+    paddingHorizontal: 48,
+    alignItems: 'center',
+    marginBottom: 32,
+    width: '100%',
+  },
+  successTokenLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#7EB3FF',
+    letterSpacing: 1.2,
+    marginBottom: 8,
+  },
+  successTokenNum: {
+    fontSize: 56,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    fontVariant: ['tabular-nums'],
+    marginBottom: 8,
+  },
+  successTokenSub: {
+    fontSize: 13,
+    color: '#B8D0FF',
+    textAlign: 'center',
+  },
+  goToQueueBtn: {
+    backgroundColor: REC_BLUE,
+    borderRadius: 14,
+    paddingVertical: 15,
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  goToQueueBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  registerAnotherBtn: {
+    paddingVertical: 13,
+    width: '100%',
+    alignItems: 'center',
+  },
+  registerAnotherBtnText: {
+    color: Colors.sub,
+    fontSize: 15,
+    fontWeight: '600',
   },
 });
