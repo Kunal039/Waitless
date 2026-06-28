@@ -50,6 +50,14 @@ export default function PatientLayout() {
           tabBarIcon: ({ focused }) => <TabIcon emoji="👤" focused={focused} />,
         }}
       />
+      <Tabs.Screen name="hospitals/[id]" options={{ href: null }} />
+      <Tabs.Screen name="doctors/[id]" options={{ href: null }} />
+      <Tabs.Screen name="book-doctor" options={{ href: null }} />
+      <Tabs.Screen name="patient-info" options={{ href: null }} />
+      <Tabs.Screen name="appointment-summary" options={{ href: null }} />
+      <Tabs.Screen name="payment" options={{ href: null }} />
+      <Tabs.Screen name="booking-confirmed" options={{ href: null }} />
+      <Tabs.Screen name="queue/[appointmentId]" options={{ href: null }} />
     </Tabs>
   )
 }
